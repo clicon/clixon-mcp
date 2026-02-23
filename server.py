@@ -5,16 +5,20 @@ import sys
 
 from argparse import ArgumentParser
 from mcp.server.fastmcp import FastMCP
-from time import sleep
 
 mcp = FastMCP("Clixon MCP Server")
 logger = logging.getLogger(__name__)
 
 _config_cache: dict = {}
 _config_url: str = ""
+_args = None
 
 
 def parse_args():
+    """
+    Parse command-line arguments for the MCP server.
+    """
+
     parser = ArgumentParser(description="Clixon MCP Server")
     parser.add_argument(
         "--restconf-url",
@@ -40,79 +44,141 @@ def parse_args():
     return parser.parse_args()
 
 
+def _get_auth():
+    """
+    Return HTTP basic auth tuple if credentials are configured, else None.
+    """
+    if _args and _args.restconf_username:
+        return (_args.restconf_username, _args.restconf_password)
+
+    return None
+
+
+def _get_verify_ssl() -> bool:
+    return _args.restconf_verify_ssl if _args else False
+
+
+def _post_rpc(device_name: str, config: dict) -> str:
+    """
+    Send an RPC call to the RESTCONF API and return the transaction ID.
+    """
+
+    rpc_json = {
+        "clixon-controller:input": {
+            "device": device_name,
+            "config": config,
+        }
+    }
+
+    logger.info(f"RPC call to device '{device_name}': {rpc_json}")
+
+    try:
+        response = httpx.post(
+            f"{_args.restconf_url}/operations/clixon-controller:device-rpc",
+            headers={"Content-Type": "application/yang-data+json"},
+            json=rpc_json,
+            auth=_get_auth(),
+            verify=_get_verify_ssl(),
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        tid = response.json().get("clixon-controller:output", {}).get("tid")
+        if not tid:
+            logger.error("RPC response did not contain a transaction ID")
+            return "Error: RPC response did not contain a transaction ID."
+
+        logger.info(f"RPC initiated, transaction ID: {tid}")
+        return str(tid)
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error during RPC call: {e}")
+        return f"Error: HTTP {e.response.status_code} from RESTCONF API: {e}"
+    except httpx.RequestError as e:
+        logger.error(f"Request error during RPC call: {e}")
+        return f"Error: Could not reach RESTCONF API: {e}"
+
+
 @mcp.tool()
 def fetch_config() -> str:
     """
-    Fetch network device configuration via RESTCONF.
-    """
+    Fetch network device configuration from the RESTCONF API and cache it locally.
 
+    Returns the full configuration as JSON. Use get_config_path to extract
+    specific sections afterward.
+    """
     global _config_cache, _config_url
 
-    args = parse_args()
-    headers = {"Accept": "application/yang-data+json"}
-
     try:
-        auth = (
-            (args.restconf_username, args.restconf_password)
-            if args.restconf_username
-            else None
-        )
         response = httpx.get(
-            args.restconf_url,
-            headers=headers,
-            auth=auth,
-            verify=args.restconf_verify_ssl,
+            _args.restconf_url,
+            headers={"Accept": "application/yang-data+json"},
+            auth=_get_auth(),
+            verify=_get_verify_ssl(),
             timeout=30,
         )
         response.raise_for_status()
         _config_cache = response.json()
-        _config_url = args.restconf_url
+        _config_url = _args.restconf_url
 
         logger.info(f"Configuration fetched successfully from {_config_url}")
-
         return json.dumps(_config_cache, indent=2)
-    except Exception as e:
-        logger.error(f"Error fetching config from {args.restconf_url}: {e}")
-        return f"Error fetching config: {e}"
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching config: {e}")
+        return f"Error: HTTP {e.response.status_code} fetching config from {_args.restconf_url}: {e}"
+    except httpx.RequestError as e:
+        logger.error(f"Request error fetching config: {e}")
+        return f"Error: Could not reach {_args.restconf_url}: {e}"
 
 
 @mcp.tool()
-def write_config():
+def write_config() -> str:
     """
-    Write network device configuration back to the device via RESTCONF.
+    Write the cached configuration back to the device via RESTCONF PUT.
 
-    The RESTCONF URL from the last fetch_config call will be used. Make sure
-    to set the URL with set_config_url if you want to write to a different
-    device or endpoint.
-
-    Config should be written using HTTP PUT to the same URL used to fetch,
-    with the config as JSON body. This is a simple implementation and may need
-    to be adjusted based on the specific RESTCONF API of the device, including
-    handling of authentication, headers, and response parsing.
+    Uses the URL from the last fetch_config call. Call set_config_url first if
+    you need to write to a different endpoint.
     """
-
     global _config_cache, _config_url
 
     if not _config_cache or not _config_url:
-        return "No configuration cached. Use fetch_config to load from a device."
+        return "No configuration cached. Use fetch_config to load from a device first."
 
-    logger.info(f"Attempting to write configuration back to {_config_url}")
+    logger.info(f"Writing configuration back to {_config_url}")
 
-    return _config_cache, _config_url
+    try:
+        response = httpx.put(
+            _config_url,
+            headers={"Content-Type": "application/yang-data+json"},
+            json=_config_cache,
+            auth=_get_auth(),
+            verify=_get_verify_ssl(),
+            timeout=30,
+        )
+        response.raise_for_status()
+        logger.info(f"Configuration written successfully to {_config_url}")
+        return f"Configuration written successfully to {_config_url}."
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error writing config: {e}")
+        return (
+            f"Error: HTTP {e.response.status_code} writing config to {_config_url}: {e}"
+        )
+    except httpx.RequestError as e:
+        logger.error(f"Request error writing config: {e}")
+        return f"Error: Could not reach {_config_url}: {e}"
 
 
 @mcp.tool()
 def get_config() -> str:
     """
-    Return the currently cached RESTCONF configuration.
+    Return the currently cached RESTCONF configuration as JSON.
 
     Call fetch_config first to load configuration from a device.
     """
-
     if not _config_cache:
-        return "No configuration cached. Use fetch_config to load from a device."
-
-    logger.info("Returning cached configuration")
+        return "No configuration cached. Use fetch_config to load from a device first."
 
     return json.dumps(_config_cache, indent=2)
 
@@ -120,26 +186,23 @@ def get_config() -> str:
 @mcp.tool()
 def get_config_path(path: str) -> str:
     """
-    Extract a specific section from the cached configuration by dot-separated path.
+    Extract a specific section from the cached configuration by dot-separated
+    path.
 
     Args:
         path: Dot-separated path into the config, e.g.
               "ietf-interfaces:interfaces" or
               "ietf-interfaces:interfaces.interface"
     """
-
     if not _config_cache:
-        return "No configuration cached. Use fetch_config to load from a device."
+        return "No configuration cached. Use fetch_config to load from a device first."
 
     current = _config_cache
-
     for key in path.split("."):
         if isinstance(current, dict) and key in current:
             current = current[key]
         else:
             return f"Path '{path}' not found in configuration."
-
-    logger.info(f"Extracted config path '{path}' successfully")
 
     return json.dumps(current, indent=2) if not isinstance(current, str) else current
 
@@ -147,227 +210,114 @@ def get_config_path(path: str) -> str:
 @mcp.tool()
 def get_config_url() -> str:
     """
-    Return the RESTCONF URL used to fetch the configuration.
+    Return the RESTCONF URL currently in use.
     """
-
-    logger.info("Returning RESTCONF URL used for fetching configuration")
 
     return (
         _config_url
         if _config_url
-        else "No RESTCONF URL set. Use fetch_config to load from a device."
+        else "No RESTCONF URL set. Use fetch_config to load from a device first."
     )
 
 
 @mcp.tool()
 def set_config_url(url: str) -> str:
     """
-    Set the RESTCONF URL to be used for fetching configuration.
+    Override the RESTCONF URL used for subsequent API calls.
     """
 
     global _config_url
 
     _config_url = url
-
     logger.info(f"RESTCONF URL set to: {_config_url}")
 
     return f"RESTCONF URL set to: {_config_url}"
 
 
 @mcp.tool()
-def get_schema():
+def get_schema() -> str:
     """
-    Get the YANG schema from the RESTCONF API.
+    Fetch all YANG schemas from the device.
 
-    After this tool is called, use poll_transaction with the returned transaction ID to
-    fetch the result once the transaction is complete.
-
-    Use the schemas to learn which RPC calls are supported by the device and
-    how to structure the RPC input for get_rpc.
+    Returns a transaction ID. Use poll_transaction to retrieve the result once
+    the transaction completes.
     """
-
-    return get_rpc("", "get-schema", {"schema-name": "all"})
+    return _post_rpc("", {"get-schema": {"schema-name": "all"}})
 
 
 @mcp.tool()
-def get_rpc(device_name: str, rpc_name: str, rpc_args: dict = None):
+def get_rpc(device_name: str, rpc_name: str, rpc_args: dict = None) -> str:
     """
-    Run get_config as a first step.
+    Execute an RPC call on a device via the RESTCONF API.
 
-    Get device information using an RPC call to the RESTCONF API.
+    Returns a transaction ID. Use poll_transaction to retrieve the result once
+    the transaction completes.
 
-    After this tool is called, use poll_transaction with the returned transaction ID to
-    fetch the result once the transaction is complete.
-
-    This function will return the tid (transaction ID) of the initiated RPC
-    call, which can be used to poll for the result.
-
-    Parameters:
-    - device_name: The name of the device to run the RPC on.
-    - rpc_name: The name of the RPC to run, e.g. "get-bgp-neighbor-information".
-    - rpc_args: A dictionary of arguments to pass to the RPC, structured according to the device's YANG model for the RPC input.
+    Args:
+        device_name: Name of the target device.
+        rpc_name: RPC operation name, e.g. "get-bgp-neighbor-information".
+        rpc_args: Arguments for the RPC, structured per the device's YANG model.
     """
-
-    try:
-        auth = (
-            (args.restconf_username, args.restconf_password)
-            if args.restconf_username
-            else None
-        )
-
-        rpc_json = {
-                "clixon-controller:input": {
-                    "device": device_name,
-                    "config": {
-                        rpc_name: rpc_args
-                    },
-                }
-            }
-
-        logger.info(device_name)
-        logger.info(args.restconf_url)
-        logger.info(rpc_json)
-
-        rpc_response = httpx.post(
-            f"{args.restconf_url}/operations/clixon-controller:device-rpc",
-            headers={"Content-Type": "application/yang-data+json"},
-            json=rpc_json,
-            auth=auth,
-            verify=args.restconf_verify_ssl,
-            timeout=30,
-        )
-
-        rpc_response.raise_for_status()
-
-        tid = rpc_response.json().get("clixon-controller:output", {}).get("tid")
-
-        if not tid:
-            logger.error("RPC response did not contain transaction ID")
-            return "Error: RPC response did not contain transaction ID"
-
-        logger.info(f"RPC initiated successfully, transaction ID: {tid}")
-
-        return tid
-
-    except Exception as e:
-        logger.error(f"Error during RPC call to fetch BGP neighbor information: {e}")
-        return f"Error during RPC call: {e}"
+    return _post_rpc(device_name, {rpc_name: rpc_args or {}})
 
 
 @mcp.tool()
-def get_state(device_name: str):
+def get_state(device_name: str) -> str:
     """
-    Run get_config as a first step.
+    Retrieve the full operational state of a device via RESTCONF RPC.
 
-    Get device state information using an RPC call to the RESTCONF API.
+    Returns a transaction ID. Use poll_transaction to retrieve the result once
+    the transaction completes.
 
-    After this tool is called, use poll_transaction with the returned
-    transaction ID to fetch the result once the transaction is complete.
-
-    This function will return the tid (transaction ID) of the initiated RPC
-    call, which can be used to poll for the result.
+    Args:
+        device_name: Name of the target device.
     """
-
-    try:
-        auth = (
-            (args.restconf_username, args.restconf_password)
-            if args.restconf_username
-            else None
-        )
-
-        rpc_json = {
-                "clixon-controller:input": {
-                    "device": device_name,
-                    "config": {
-                        "get": {}
-                    }
-                },
-            }
-
-        logger.info(device_name)
-        logger.info(args.restconf_url)
-        logger.info(rpc_json)
-
-        rpc_response = httpx.post(
-            f"{args.restconf_url}/operations/clixon-controller:device-rpc",
-            headers={"Content-Type": "application/yang-data+json"},
-            json=rpc_json,
-            auth=auth,
-            verify=args.restconf_verify_ssl,
-            timeout=30,
-        )
-
-        rpc_response.raise_for_status()
-
-        tid = rpc_response.json().get("clixon-controller:output", {}).get("tid")
-
-        if not tid:
-            logger.error("RPC response did not contain transaction ID")
-            return "Error: RPC response did not contain transaction ID"
-
-        logger.info(f"RPC initiated successfully, transaction ID: {tid}")
-
-        return tid
-
-    except Exception as e:
-        logger.error(f"Error during RPC call to fetch BGP neighbor information: {e}")
-        return f"Error during RPC call: {e}"
+    return _post_rpc(device_name, {"get": {}})
 
 
 @mcp.tool()
-def poll_transaction(tid: int):
+def poll_transaction(tid: int) -> str:
     """
-    Poll for the transaction to finish and fetch the result.
+    Poll for an RPC transaction to finish and return the result.
 
-    Example where 5 is the transaction ID returned from the RPC call:
-        GET /restconf/data/clixon-controller:transactions/transaction=5 HTTP/1.1
+    Do not retry on failure — report the error to the user instead.
 
-    If this function fails, don't try again but let the user know that the
-    transaction result couldn't be fetched. This is to avoid infinite loops in
-    case of errors.
+    Args:
+        tid: Transaction ID returned by get_rpc, get_state, or get_schema.
     """
-
-    auth = (
-        (args.restconf_username, args.restconf_password)
-        if args.restconf_username
-        else None
-    )
-
     try:
-        transaction_response = httpx.get(
-            f"{args.restconf_url}/data/clixon-controller:transactions/transaction={tid}",
+        response = httpx.get(
+            f"{_args.restconf_url}/data/clixon-controller:transactions/transaction={tid}",
             headers={"Accept": "application/yang-data+json"},
-            auth=auth,
-            verify=args.restconf_verify_ssl,
+            auth=_get_auth(),
+            verify=_get_verify_ssl(),
             timeout=30,
         )
+        response.raise_for_status()
+        data = response.json()
 
-        transaction_response.raise_for_status()
+        transaction = data.get("clixon-controller:transaction", [{}])
+        if not transaction:
+            return f"Error: Unexpected response format — missing 'clixon-controller:transaction': {response.text}"
 
-        if "clixon-controller:transaction" not in transaction_response.json():
-            return f"Error: Unexpected response format, missing 'clixon-controller:transaction' key: {transaction_response.text}"
+        result = transaction[0].get("result")
+        if not result:
+            return f"Error: Transaction has no 'result' field yet: {response.text}"
 
-        if "result" not in transaction_response.json()["clixon-controller:transaction"][0]:
-            return f"Error: Unexpected response format, missing 'result' key in transaction: {transaction_response.text}"
+        return json.dumps(data, indent=2)
 
-        if "SUCCESS" in transaction_response.json()["clixon-controller:transaction"][0]["result"]:
-            return json.dumps(transaction_response.json(), indent=2)
-
-    except Exception as e:
-        logger.error(f"Error polling transaction {tid}: {e}")
-        return f"Error polling transaction: {e}"
-
-    logger.info(
-        f"Transaction completed successfully, fetching result for transaction ID: {tid}"
-    )
-
-    return json.dumps(transaction_response.json(), indent=2)
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error polling transaction {tid}: {e}")
+        return f"Error: HTTP {e.response.status_code} polling transaction {tid}: {e}"
+    except httpx.RequestError as e:
+        logger.error(f"Request error polling transaction {tid}: {e}")
+        return f"Error: Could not reach RESTCONF API polling transaction {tid}: {e}"
 
 
 @mcp.tool()
 def clear_config_cache() -> str:
     """
-    Clear the cached configuration.
+    Clear the cached configuration and stored RESTCONF URL.
     """
 
     global _config_cache, _config_url
@@ -380,62 +330,17 @@ def clear_config_cache() -> str:
     return "Configuration cache cleared."
 
 
-@mcp.tool()
-def list_tools() -> str:
-    """
-    List available tools.
-    """
-
-    logger.info("Listing available tools")
-
-    return json.dumps(
-        {
-            "fetch_config": "Fetch network device configuration via RESTCONF.",
-            "write_config": "Write the cached configuration back to the device via RESTCONF.",
-            "get_config": "Return the currently cached RESTCONF configuration.",
-            "get_config_path": "Extract a specific section from the cached configuration by dot-separated path.",
-            "get_config_url": "Return the RESTCONF URL used to fetch the configuration.",
-            "set_config_url": "Set the RESTCONF URL to be used for fetching configuration.",
-            "clear_config_cache": "Clear the cached configuration.",
-        },
-        indent=2,
-    )
-
-
-@mcp.tool()
-def help() -> str:
-    """
-    Return a help message describing the server and available tools.
-    """
-
-    logger.info("Returning help message")
-
-    return (
-        "This is the Clixon MCP Server, designed to fetch and analyze network device configurations via RESTCONF.\n"
-        "Available tools:\n"
-        "1. fetch_config: Fetch network device configuration via RESTCONF.\n"
-        "2. get_config: Return the currently cached RESTCONF configuration.\n"
-        "3. get_config_path: Extract a specific section from the cached configuration by dot-separated path.\n"
-        "4. get_config_url: Return the RESTCONF URL used to fetch the configuration.\n"
-        "5. clear_config_cache: Clear the cached configuration.\n"
-        "Use these tools to load and analyze device configurations."
-    )
-
-
 @mcp.resource("config://server-info")
 def server_info() -> str:
     """
     Return server metadata as JSON.
     """
 
-    logger.info("Returning server metadata")
-
     return json.dumps(
         {
             "name": "Clixon MCP Server",
             "version": "0.1.0",
-            "python_version": f"{__import__('sys').version}",
-            "tools": ["fetch_config", "get_config", "get_config_path"],
+            "python_version": sys.version,
         },
         indent=2,
     )
@@ -447,26 +352,24 @@ def analyze_config() -> str:
     Create a prompt to fetch and analyze device configuration.
     """
 
-    logger.info("Creating prompt for configuration analysis")
-
     return (
-        "Fetch the RESTCONF configuration', "
+        "Fetch the RESTCONF configuration, "
         "then provide an overview of the device configuration including:\n"
         "1. Configured interfaces and their status\n"
         "2. Routing configuration\n"
         "3. Any security-related settings\n"
         "4. Any anomalies or potential issues you can identify\n"
-        "Use the get_config_path tool to extract specific sections of the config as needed.\n"
-        "Any other notable settings"
+        "5. Any other notable settings\n"
+        "Use the get_config_path tool to extract specific sections as needed."
     )
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    _args = parse_args()
 
-    if not args.restconf_url:
+    if not _args.restconf_url:
         print(
-            "Warning: No RESTCONF URL provided. Use --restconf-url to specify a device to fetch configuration from."
+            "Warning: No RESTCONF URL provided. Use --restconf-url to specify a device."
         )
         sys.exit(0)
 
