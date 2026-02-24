@@ -169,7 +169,8 @@ def get_config() -> str:
 @mcp.tool()
 def get_config_path(path: str) -> str:
     """
-    Extract a specific section from the cached configuration by dot-separated path.
+    Extract a specific section from the cached configuration by dot-separated
+    path. Call fetch_config first to load configuration from a device.
 
     Args:
         path: Dot-separated path into the config, e.g.
@@ -363,6 +364,12 @@ def list_tools() -> str:
             "get_config_url": "Return the RESTCONF URL used to fetch the configuration.",
             "set_config_url": "Set the RESTCONF URL to be used for fetching configuration.",
             "clear_config_cache": "Clear the cached configuration.",
+            "get_schema": "Get the YANG schema from the RESTCONF API.",
+            "get_rpc": "Run an RPC call on the device via RESTCONF.",
+            "get_state": "Get device state information using an RPC call to the RESTCONF API.",
+            "poll_transaction": "Poll for the transaction to finish and fetch the result.",
+            "list_tools": "List available tools.",
+            "help": "Return a help message describing the server and available tools.",
         },
         indent=2,
     )
@@ -408,7 +415,7 @@ def server_info() -> str:
 
 
 @mcp.prompt()
-def analyze_device(focus: str = "general") -> str:
+def analyze_device() -> str:
     """
     Analyze a network device managed by the Clixon controller.
 
@@ -417,7 +424,7 @@ def analyze_device(focus: str = "general") -> str:
                "security", or any free-text topic.
     """
 
-    logger.info(f"Creating analysis prompt with focus: {focus}")
+    logger.info("Creating analysis prompt")
 
     return (
         "You are a network engineer analyzing devices managed by a Clixon RESTCONF controller.\n\n"
@@ -427,7 +434,6 @@ def analyze_device(focus: str = "general") -> str:
         "2. Use get_schema to discover the YANG models and supported RPCs.\n"
         "3. Use get_config_path to drill into specific configuration sections.\n"
         "4. Use get_rpc / get_state with poll_transaction to collect live device data as needed.\n\n"
-        f"Focus area: {focus}\n\n"
         "Provide a clear summary covering:\n"
         "- Current state and configuration relevant to the focus area\n"
         "- Any anomalies, misconfigurations, or potential issues\n"
