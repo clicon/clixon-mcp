@@ -11,7 +11,7 @@ uv sync
 ## Run
 
 ```bash
-uv run server.py --restconf-url https://localhost:8443/restconf/data
+uv run server.py --restconf-url https://localhost:8443/restconf/
 ```
 
 ### CLI Arguments
