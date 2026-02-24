@@ -5,13 +5,76 @@ import sys
 
 from argparse import ArgumentParser
 from mcp.server.fastmcp import FastMCP
-from time import sleep
 
 mcp = FastMCP("Clixon MCP Server")
 logger = logging.getLogger(__name__)
 
 _config_cache: dict = {}
 _config_url: str = ""
+_args = None
+
+
+def _get_auth():
+    if _args and _args.restconf_username:
+        return (_args.restconf_username, _args.restconf_password)
+    return None
+
+
+def _restconf_get(path):
+    """
+    Make an authenticated RESTCONF GET request.
+    """
+
+    return httpx.get(
+        f"{_args.restconf_url}{path}",
+        headers={"Accept": "application/yang-data+json"},
+        auth=_get_auth(),
+        verify=_args.restconf_verify_ssl,
+        timeout=30,
+    )
+
+
+def _restconf_post(path, json_body):
+    """
+    Make an authenticated RESTCONF POST request.
+    """
+
+    return httpx.post(
+        f"{_args.restconf_url}{path}",
+        headers={"Content-Type": "application/yang-data+json"},
+        json=json_body,
+        auth=_get_auth(),
+        verify=_args.restconf_verify_ssl,
+        timeout=30,
+    )
+
+
+def _device_rpc(device_name, config):
+    """
+    Send a device RPC and return the transaction ID.
+    """
+
+    rpc_json = {
+        "clixon-controller:input": {
+            "device": device_name,
+            "config": config,
+        }
+    }
+
+    logger.info(f"RPC to {device_name}: {config}")
+
+    response = _restconf_post("/operations/clixon-controller:device-rpc", rpc_json)
+    response.raise_for_status()
+
+    tid = response.json().get("clixon-controller:output", {}).get("tid")
+
+    if not tid:
+        logger.error("RPC response did not contain transaction ID")
+        return "Error: RPC response did not contain transaction ID"
+
+    logger.info(f"RPC initiated successfully, transaction ID: {tid}")
+
+    return tid
 
 
 def parse_args():
@@ -48,31 +111,17 @@ def fetch_config() -> str:
 
     global _config_cache, _config_url
 
-    args = parse_args()
-    headers = {"Accept": "application/yang-data+json"}
-
     try:
-        auth = (
-            (args.restconf_username, args.restconf_password)
-            if args.restconf_username
-            else None
-        )
-        response = httpx.get(
-            args.restconf_url + "/data",
-            headers=headers,
-            auth=auth,
-            verify=args.restconf_verify_ssl,
-            timeout=30,
-        )
+        response = _restconf_get("/data")
         response.raise_for_status()
         _config_cache = response.json()
-        _config_url = args.restconf_url
+        _config_url = _args.restconf_url
 
         logger.info(f"Configuration fetched successfully from {_config_url}")
 
         return json.dumps(_config_cache, indent=2)
     except Exception as e:
-        logger.error(f"Error fetching config from {args.restconf_url}: {e}")
+        logger.error(f"Error fetching config from {_args.restconf_url}: {e}")
         return f"Error fetching config: {e}"
 
 
@@ -209,48 +258,9 @@ def get_rpc(device_name: str, rpc_name: str, rpc_args: dict = None):
     """
 
     try:
-        auth = (
-            (args.restconf_username, args.restconf_password)
-            if args.restconf_username
-            else None
-        )
-
-        rpc_json = {
-                "clixon-controller:input": {
-                    "device": device_name,
-                    "config": {
-                        rpc_name: rpc_args
-                    },
-                }
-            }
-
-        logger.info(device_name)
-        logger.info(args.restconf_url)
-        logger.info(rpc_json)
-
-        rpc_response = httpx.post(
-            f"{args.restconf_url}/operations/clixon-controller:device-rpc",
-            headers={"Content-Type": "application/yang-data+json"},
-            json=rpc_json,
-            auth=auth,
-            verify=args.restconf_verify_ssl,
-            timeout=30,
-        )
-
-        rpc_response.raise_for_status()
-
-        tid = rpc_response.json().get("clixon-controller:output", {}).get("tid")
-
-        if not tid:
-            logger.error("RPC response did not contain transaction ID")
-            return "Error: RPC response did not contain transaction ID"
-
-        logger.info(f"RPC initiated successfully, transaction ID: {tid}")
-
-        return tid
-
+        return _device_rpc(device_name, {rpc_name: rpc_args})
     except Exception as e:
-        logger.error(f"Error during RPC call to fetch BGP neighbor information: {e}")
+        logger.error(f"Error during RPC call: {e}")
         return f"Error during RPC call: {e}"
 
 
@@ -269,48 +279,9 @@ def get_state(device_name: str):
     """
 
     try:
-        auth = (
-            (args.restconf_username, args.restconf_password)
-            if args.restconf_username
-            else None
-        )
-
-        rpc_json = {
-                "clixon-controller:input": {
-                    "device": device_name,
-                    "config": {
-                        "get": {}
-                    }
-                },
-            }
-
-        logger.info(device_name)
-        logger.info(args.restconf_url)
-        logger.info(rpc_json)
-
-        rpc_response = httpx.post(
-            f"{args.restconf_url}/operations/clixon-controller:device-rpc",
-            headers={"Content-Type": "application/yang-data+json"},
-            json=rpc_json,
-            auth=auth,
-            verify=args.restconf_verify_ssl,
-            timeout=30,
-        )
-
-        rpc_response.raise_for_status()
-
-        tid = rpc_response.json().get("clixon-controller:output", {}).get("tid")
-
-        if not tid:
-            logger.error("RPC response did not contain transaction ID")
-            return "Error: RPC response did not contain transaction ID"
-
-        logger.info(f"RPC initiated successfully, transaction ID: {tid}")
-
-        return tid
-
+        return _device_rpc(device_name, {"get": {}})
     except Exception as e:
-        logger.error(f"Error during RPC call to fetch BGP neighbor information: {e}")
+        logger.error(f"Error during RPC call: {e}")
         return f"Error during RPC call: {e}"
 
 
@@ -327,30 +298,25 @@ def poll_transaction(tid: int):
     case of errors.
     """
 
-    auth = (
-        (args.restconf_username, args.restconf_password)
-        if args.restconf_username
-        else None
-    )
-
     try:
-        transaction_response = httpx.get(
-            f"{args.restconf_url}/data/clixon-controller:transactions/transaction={tid}",
-            headers={"Accept": "application/yang-data+json"},
-            auth=auth,
-            verify=args.restconf_verify_ssl,
-            timeout=30,
+        transaction_response = _restconf_get(
+            f"/data/clixon-controller:transactions/transaction={tid}"
         )
-
         transaction_response.raise_for_status()
 
         if "clixon-controller:transaction" not in transaction_response.json():
             return f"Error: Unexpected response format, missing 'clixon-controller:transaction' key: {transaction_response.text}"
 
-        if "result" not in transaction_response.json()["clixon-controller:transaction"][0]:
+        if (
+            "result"
+            not in transaction_response.json()["clixon-controller:transaction"][0]
+        ):
             return f"Error: Unexpected response format, missing 'result' key in transaction: {transaction_response.text}"
 
-        if "SUCCESS" in transaction_response.json()["clixon-controller:transaction"][0]["result"]:
+        if (
+            "SUCCESS"
+            in transaction_response.json()["clixon-controller:transaction"][0]["result"]
+        ):
             return json.dumps(transaction_response.json(), indent=2)
 
     except Exception as e:
@@ -442,29 +408,37 @@ def server_info() -> str:
 
 
 @mcp.prompt()
-def analyze_config() -> str:
+def analyze_device(focus: str = "general") -> str:
     """
-    Create a prompt to fetch and analyze device configuration.
+    Analyze a network device managed by the Clixon controller.
+
+    Args:
+        focus: Area to focus on — "general", "interfaces", "routing",
+               "security", or any free-text topic.
     """
 
-    logger.info("Creating prompt for configuration analysis")
+    logger.info(f"Creating analysis prompt with focus: {focus}")
 
     return (
-        "Fetch the RESTCONF configuration', "
-        "then provide an overview of the device configuration including:\n"
-        "1. Configured interfaces and their status\n"
-        "2. Routing configuration\n"
-        "3. Any security-related settings\n"
-        "4. Any anomalies or potential issues you can identify\n"
-        "Use the get_config_path tool to extract specific sections of the config as needed.\n"
-        "Any other notable settings"
+        "You are a network engineer analyzing devices managed by a Clixon RESTCONF controller.\n\n"
+        "Network engineers don't talk much so keep it short.\n\n"
+        "Steps:\n"
+        "1. Use fetch_config to load the current device configuration.\n"
+        "2. Use get_schema to discover the YANG models and supported RPCs.\n"
+        "3. Use get_config_path to drill into specific configuration sections.\n"
+        "4. Use get_rpc / get_state with poll_transaction to collect live device data as needed.\n\n"
+        f"Focus area: {focus}\n\n"
+        "Provide a clear summary covering:\n"
+        "- Current state and configuration relevant to the focus area\n"
+        "- Any anomalies, misconfigurations, or potential issues\n"
+        "- Actionable recommendations if problems are found\n"
     )
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    _args = parse_args()
 
-    if not args.restconf_url:
+    if not _args.restconf_url:
         print(
             "Warning: No RESTCONF URL provided. Use --restconf-url to specify a device to fetch configuration from."
         )
