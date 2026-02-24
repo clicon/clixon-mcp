@@ -192,6 +192,8 @@ def get_config_path(path: str) -> str:
     for key in path.split("."):
         if isinstance(current, dict) and key in current:
             current = current[key]
+        elif isinstance(current, list) and key.isdigit() and int(key) < len(current):
+            current = current[int(key)]
         else:
             return f"Path '{path}' not found in configuration."
 
