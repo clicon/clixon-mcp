@@ -20,10 +20,12 @@ def _get_auth():
     return None
 
 
-def _restconf_get(path):
+def _restconf_get(path: str):
     """
     Make an authenticated RESTCONF GET request.
     """
+
+    logger.info(f"Making RESTCONF GET request to path: {path}")
 
     return httpx.get(
         f"{_args.restconf_url}{path}",
@@ -38,6 +40,10 @@ def _restconf_post(path, json_body):
     """
     Make an authenticated RESTCONF POST request.
     """
+
+    logger.info(
+        f"Making RESTCONF POST request to path: {path} with body: {json.dumps(json_body)}"
+    )
 
     return httpx.post(
         f"{_args.restconf_url}{path}",
@@ -259,6 +265,10 @@ def get_rpc(device_name: str, rpc_name: str, rpc_args: dict = None):
     """
 
     try:
+        logger.info(
+            f"Initiating RPC '{rpc_name}' on device '{device_name}' with arguments: {rpc_args}"
+        )
+
         return _device_rpc(device_name, {rpc_name: rpc_args})
     except Exception as e:
         logger.error(f"Error during RPC call: {e}")
@@ -280,6 +290,8 @@ def get_state(device_name: str):
     """
 
     try:
+        logger.info(f"Initiating state retrieval RPC on device '{device_name}'")
+
         return _device_rpc(device_name, {"get": {}})
     except Exception as e:
         logger.error(f"Error during RPC call: {e}")
@@ -300,6 +312,8 @@ def poll_transaction(tid: int):
     """
 
     try:
+        logger.info(f"Polling for transaction ID: {tid}")
+
         transaction_response = _restconf_get(
             f"/data/clixon-controller:transactions/transaction={tid}"
         )
@@ -308,18 +322,25 @@ def poll_transaction(tid: int):
         if "clixon-controller:transaction" not in transaction_response.json():
             return f"Error: Unexpected response format, missing 'clixon-controller:transaction' key: {transaction_response.text}"
 
+        logger.info("Transaction response received, checking status...")
+
         if (
             "result"
             not in transaction_response.json()["clixon-controller:transaction"][0]
         ):
             return f"Error: Unexpected response format, missing 'result' key in transaction: {transaction_response.text}"
 
+        logger.info(
+            f"Transaction status: {transaction_response.json()['clixon-controller:transaction'][0]['result']}"
+        )
+
         if (
             "SUCCESS"
             in transaction_response.json()["clixon-controller:transaction"][0]["result"]
         ):
-            return json.dumps(transaction_response.json(), indent=2)
+            logger.info("Transaction completed successfully")
 
+            return json.dumps(transaction_response.json(), indent=2)
     except Exception as e:
         logger.error(f"Error polling transaction {tid}: {e}")
         return f"Error polling transaction: {e}"
@@ -449,5 +470,7 @@ if __name__ == "__main__":
             "Warning: No RESTCONF URL provided. Use --restconf-url to specify a device to fetch configuration from."
         )
         sys.exit(0)
+
+    _config_url = _args.restconf_url
 
     mcp.run(transport="streamable-http")
